@@ -1,15 +1,34 @@
 import asyncio
 from datetime import datetime
 from functools import partial
-from typing import Annotated, Any, AsyncGenerator, Awaitable, Callable, Literal, Mapping
+from typing import Any, AsyncGenerator, Awaitable, Callable, Literal, Mapping
 
 import sqlalchemy
 import sqlmodel
-from fastapi import APIRouter, Form, Header, HTTPException, Request, status
+from datastar_py.responses import DatastarFastAPIResponse
+from datastar_py.sse import ServerSentEventGenerator
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
+from htpy import (
+    Element,
+    HTMLElement,
+    a,
+    button,
+    div,
+    h3,
+    header,
+    img,
+    li,
+    main,
+    p,
+    script,
+    span,
+    ul,
+)
+from markupsafe import Markup
 from sqlmodel import col
-from sse_starlette.sse import EventSourceResponse
 
+from ..components import clock, event_response, page_layout
 from ..store import (
     Order,
     OrderedItem,
@@ -21,15 +40,79 @@ from ..store import (
     unixepoch,
 )
 from ..store.order import ModifiedFlag
-from ..templates import macro_template
 
 router = APIRouter()
+
+
+def link_normal(href: str, text: str) -> Element:
+    return a(href=href, class_="cursor-pointer px-2 py-1 rounded-sm bg-gray-300")[text]
+
+
+def link_selected(href: str, text: str) -> Element:
+    return a(
+        href=href, class_="cursor-pointer px-2 py-1 rounded-sm bg-gray-900 text-white"
+    )[text]
+
+
+def notif_ringtone(req: Request) -> list[Element]:
+    return [
+        Element("notif-ringtone")(
+            data_signals="{_notifRingtone: false}",
+            data_attr_notification="$_notifRingtone",
+            data_on_playing="$_notifRingtone = false",
+            src=str(req.url_for("static", path="notification-1.mp3")),
+        ),
+        script[
+            Markup(
+                """
+            class NotifRingtone extends HTMLElement {
+              constructor() {
+                super()
+                this.audio = new Audio()
+              }
+              static get observedAttributes() {
+                  return ["notification", "src"]
+              }
+              attributeChangedCallback(name, oldValue, newValue) {
+                if (name === "notification" && newValue) {
+                  this.audio.muted = false
+                  this.audio.play()
+                  this.dispatchEvent(new CustomEvent('playing'))
+                } else if (name === 'src') {
+                  this.audio.src = newValue
+                  this.audio.load()
+                  this.audio.muted = true
+                  // Load audio in the background on a screen touch to
+                  // circumvent the autoplay policy on iOS.
+                  // Details: https://stackoverflow.com/a/10448078
+                  document.addEventListener('touchstart', () => this.audio.play(), {once: true})
+                }
+              }
+            }
+            customElements.define("notif-ringtone", NotifRingtone)
+            """
+            )
+        ],
+    ]
 
 
 def _to_time(unix_epoch: int) -> str:
     return datetime.fromtimestamp(unix_epoch).strftime("%H:%M:%S")
 
 
+# This function exists to reduce code duplication, at the cost of terrible
+# organization of control flows.
+#
+# It abstracts out the 2-dimenstional row-by-row extraction loop. But in doing
+# so, the caller must ensure that the outer loop variables and callbacks
+# intertwines oh-so perfectly in a very subtle way. This leads to the
+# `asyncio.Lock` workarounds for avoiding race conditions between tasks. I
+# sincerely regret that I made this abomination in the first place.
+#
+# If anything, I think the loop should be handled on the caller side rather
+# than managing the loop deep in the call stack. Also, it would be nice to be
+# able to cache the constructed object so that only one connection needs to
+# construct the object and let the others waiting for it.
 async def _agen_query_executor[T](
     query: str,
     unique_key: Literal["order_id"] | Literal["product_id"],
@@ -91,10 +174,16 @@ def _ordered_items_loader() -> Callable[[], Awaitable[list[ordered_item_t]]]:
         _agen_query_executor, query_str, "product_id", init_cb, elem_cb, list_cb
     )
 
+    # Hack around the situation where multiple threads potentially modifying
+    # the `ordered_items` list simultaneously. See `_agen_query_executor` for
+    # more information.
+    lock = asyncio.Lock()
+
     async def load():
-        ordered_items.clear()
-        await load_ordered_products()
-        return ordered_items
+        async with lock:
+            ordered_items.clear()
+            await load_ordered_products()
+            return ordered_items
 
     return load
 
@@ -102,18 +191,76 @@ def _ordered_items_loader() -> Callable[[], Awaitable[list[ordered_item_t]]]:
 load_ordered_items_incoming = _ordered_items_loader()
 
 
-class ordered_items_incoming:  # namespace
-    @macro_template("ordered-items-incoming.html")
-    @staticmethod
-    def page(ordered_items: list[ordered_item_t]): ...
+elm_main_ordered_items = main(
+    id="ordered-items",
+    class_="w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 auto-rows-min gap-3 py-2 px-16 overflow-y-auto",
+)
 
-    @macro_template("ordered-items-incoming.html", "component")
-    @staticmethod
-    def component(ordered_items: list[ordered_item_t]): ...
 
-    @macro_template("ordered-items-incoming.html", "component_with_sound")
-    @staticmethod
-    def component_with_sound(ordered_items: list[ordered_item_t]): ...
+def page_ordered_items_incoming(req: Request) -> HTMLElement:
+    inner = div(
+        class_="flex flex-col", data_on_load="@get('/ordered-items/incoming-stream')"
+    )[
+        header(
+            class_="sticky z-10 inset-0 w-full px-16 py-3 flex gap-3 border-b border-gray-500 bg-white text-2xl"
+        )[
+            ul(class_="grow hidden md:flex md:flex-row gap-x-3")[
+                li(class_="grow")[link_normal("/", "ホーム")],
+                li[link_normal("/orders/incoming", "未受取：注文")],
+                li[link_selected("/ordered-items/incoming", "未受取：商品")],
+                li[link_normal("/orders/resolved", "処理済")],
+            ],
+            clock,
+        ],
+        elm_main_ordered_items,
+        notif_ringtone(req),
+    ]
+    return page_layout(req, inner, title="未受取商品 - murchace")
+
+
+def ordered_items_incoming_component(
+    req: Request, ordered_items: list[ordered_item_t]
+) -> Element:
+    def orders(ordered_item: ordered_item_t) -> list[Element]:
+        return [
+            li(
+                id=f"ordered-item-{order['order_id']}-{ordered_item['product_id']}",
+                class_="flex flex-row items-center",
+            )[
+                span(class_="text-xl")[f"#{order['order_id']}"],
+                span(class_="ml-1")[f"@{order['ordered_at']}"],
+                span(class_="whitespace-nowrap ml-auto")[f"x {order['count']}"],
+                button(
+                    data_on_click=f"@post('/orders/{order['order_id']}/products/{ordered_item['product_id']}/supplied-at')",
+                    class_="w-1/3 py-1 m-1 text-white bg-green-600 rounded-sm",
+                )["✓"],
+            ]
+            for order in ordered_item["orders"]  # pyright: ignore[reportGeneralTypeIssues]
+        ]
+
+    return elm_main_ordered_items[
+        [
+            div(
+                id=f"product-{ordered_item['product_id']}",
+                class_="h-80 flex flex-col border-2 border-gray-300 rounded-lg pb-2",
+            )[
+                div(class_="width-full flex flex-row mx-1 items-start pb-2")[
+                    h3(class_="text-lg ml-1")[ordered_item["name"]]
+                ],
+                div(class_="w-1/3 mx-auto")[
+                    img(
+                        src=str(req.url_for("static", path=ordered_item["filename"])),
+                        alt=str(ordered_item["name"]),
+                        class_="mx-auto w-full h-auto aspect-square",
+                    )
+                ],
+                ul(class_="grow overflow-y-auto px-2 divide-y-2 divide-gray-200")[
+                    *orders(ordered_item)
+                ],
+            ]
+            for ordered_item in ordered_items
+        ]
+    ]
 
 
 type item_t = dict[str, int | str | None]
@@ -182,7 +329,7 @@ def callbacks_orders_incoming(
         }
 
     def list_cb(items: list[item_t]) -> None:
-        orders[-1]["items_"] = items
+        orders[-1]["items"] = items
 
     return init_cb, elem_cb, list_cb
 
@@ -223,7 +370,7 @@ def callbacks_orders_resolved(
         }
 
     def list_cb(items: list[item_t]) -> None:
-        orders[-1]["items_"] = items
+        orders[-1]["items"] = items
         orders[-1]["total_price"] = Product.to_price_str(total_price)
 
     return init_cb, elem_cb, list_cb
@@ -247,10 +394,16 @@ def _orders_loader(
         _agen_query_executor, str(query), "order_id", init_cb, elem_cb, list_cb
     )
 
+    # Hack around the situation where multiple threads potentially modifying
+    # the `orders` list simultaneously. See `_agen_query_executor` for more
+    # information.
+    lock = asyncio.Lock()
+
     async def load():
-        orders.clear()
-        await load_orders()
-        return orders
+        async with lock:
+            orders.clear()
+            await load_orders()
+            return orders
 
     return load
 
@@ -296,133 +449,260 @@ async def load_one_resolved_order(order_id: int) -> order_t | None:
     items = [to_item(row)]
     async for row in rows_agen:
         items.append(to_item(row))
-    order["items_"] = items
+    order["items"] = items
     order["total_price"] = Product.to_price_str(total_price)
 
     return order
 
 
-class incoming_orders:  # namespace
-    @macro_template("incoming-orders.html")
-    @staticmethod
-    def page(orders: list[order_t]): ...
-
-    @macro_template("incoming-orders.html", "component")
-    @staticmethod
-    def component(orders: list[order_t]): ...
-
-    @macro_template("incoming-orders.html", "component_with_sound")
-    @staticmethod
-    def component_with_sound(orders: list[order_t]): ...
+elm_main_incoming_orders = main(
+    id="orders",
+    class_="w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 auto-rows-min gap-3 py-2 px-16 overflow-y-auto",
+)
 
 
-class resolved_orders:  # namespace
-    @macro_template("resolved-orders.html")
-    @staticmethod
-    def page(orders: list[order_t]): ...
+def page_incoming_orders(req: Request) -> HTMLElement:
+    inner = div(class_="flex flex-col", data_on_load="@get('/orders/incoming-stream')")[
+        header(
+            class_="sticky z-10 inset-0 w-full px-16 py-3 flex gap-3 border-b border-gray-500 bg-white text-2xl"
+        )[
+            ul(class_="grow hidden md:flex md:flex-row gap-x-3")[
+                li(class_="grow")[link_normal("/", "ホーム")],
+                li[link_selected("/orders/incoming", "未受取：注文")],
+                li[link_normal("/ordered-items/incoming", "未受取：商品")],
+                li[link_normal("/orders/resolved", "処理済")],
+            ],
+            clock,
+        ],
+        elm_main_incoming_orders,
+        notif_ringtone(req),
+    ]
+    return page_layout(req, inner, title="未受取注文 - murchace")
 
-    @macro_template("resolved-orders.html", "completed")
-    @staticmethod
-    def completed(order: order_t): ...
 
-    @macro_template("resolved-orders.html", "canceled")
-    @staticmethod
-    def canceled(order: order_t): ...
+def incoming_orders_component(orders: list[order_t]) -> Element:
+    def ordered_items(order: order_t) -> list[Element]:
+        return [
+            li(class_="flex flex-row items-start gap-x-2 px-1")[
+                (
+                    span(class_="text-green-500 font-bold")["✓"]
+                    if item["supplied_at"]
+                    else span(class_="text-red-500 font-bold")["✗"]
+                ),
+                span(class_="break-words")[item["name"]],
+                span(class_="ml-auto whitespace-nowrap")[f"x {item['count']}"],
+            ]
+            for item in order["items"]  # pyright: ignore[reportGeneralTypeIssues, reportOptionalIterable]
+        ]
+
+    return elm_main_incoming_orders[
+        [
+            div(
+                id=f"order-{order['order_id']}",
+                class_="w-full h-60 flex flex-col gap-y-1 border-2 border-gray-300 rounded-lg pb-2",
+            )[
+                div(class_="width-full flex flex-row p-2 items-start")[
+                    div(class_="grow flex flex-row items-end")[
+                        h3(class_="text-2xl")[f"#{order['order_id']}"],
+                        span(class_="ml-1")[f"@{order['ordered_at']}"],
+                    ],
+                    button(
+                        data_on_click=f"confirm('確定注文 #{order['order_id']} を取り消しますか？') && @post('/orders/{order['order_id']}/canceled-at')",
+                        class_="px-2 py-1 text-white bg-red-600 rounded-lg",
+                    )["取消"],
+                ],
+                ul(class_="grow overflow-y-auto px-2 divide-y-2 divide-gray-200")[
+                    ordered_items(order)
+                ],
+                button(
+                    data_on_click=f"@post('/orders/{order['order_id']}/completed-at')",
+                    class_="mx-10 py-1 text-white bg-blue-600 rounded-lg",
+                )["完了"],
+            ]
+            for order in orders
+        ]
+    ]
+
+
+def page_resolved_orders(req: Request, orders: list[order_t]) -> HTMLElement:
+    inner = div(class_="flex flex-col")[
+        header(
+            class_="sticky z-10 inset-0 w-full px-16 py-3 flex gap-3 border-b border-gray-500 bg-white text-2xl"
+        )[
+            ul(class_="grow hidden md:flex md:flex-row gap-x-3")[
+                li(class_="grow")[link_normal("/", "ホーム")],
+                li[link_normal("/orders/incoming", "未受取：注文")],
+                li[link_normal("/ordered-items/incoming", "未受取：商品")],
+                li[link_selected("/orders/resolved", "処理済")],
+            ],
+            clock,
+        ],
+        main(
+            id="orders",
+            class_="w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 auto-rows-min gap-3 py-2 px-16 overflow-y-auto",
+        )[
+            [
+                resolved_order_completed(order)
+                if order["completed_at"]
+                else resolved_order_canceled(order)
+                for order in reversed(orders)
+            ]
+        ],
+    ]
+    return page_layout(req, inner, title="処理済注文 - murchace")
+
+
+def resolved_order_completed(order: order_t) -> Element:
+    return div(
+        id=f"order-{order['order_id']}",
+        class_="w-full h-64 flex flex-col gap-y-1 border-2 border-gray-300 rounded-lg pb-2",
+    )[
+        div(class_="width-full flex flex-row items-start p-2 bg-cyan-100 rounded-t-lg")[
+            div(class_="grow flex flex-row items-end")[
+                h3(class_="text-2xl")[f"#{order['order_id']}"],
+                span(class_="ml-1")[f"@{order['ordered_at']}-{order['completed_at']}"],
+            ],
+            button(
+                data_on_click=f"confirm('完了した注文 #{order['order_id']} を取り消しますか？') && @post('/orders/{order['order_id']}/canceled-at?card_response=1')",
+                class_="px-2 py-1 text-white bg-red-600 rounded-lg",
+            )["取消"],
+        ],
+        _order_body(order),
+    ]
+
+
+def resolved_order_canceled(order: order_t) -> Element:
+    return div(
+        id=f"order-{order['order_id']}",
+        class_="w-full h-64 flex flex-col gap-y-1 border-2 border-gray-300 rounded-lg pb-2",
+    )[
+        div(
+            class_="width-full flex flex-row items-start p-2 bg-orange-200 rounded-t-md"
+        )[
+            div(class_="grow flex flex-row items-end")[
+                h3(class_="text-2xl line-through")[f"#{order['order_id']}"],
+                span(class_="ml-1")[f"@{order['ordered_at']}-{order['canceled_at']}"],
+            ],
+            button(
+                data_on_click=f"$card_response=true; confirm('一度取り消した注文 #{order['order_id']} を完了しますか？') && @post('/orders/{order['order_id']}/completed-at?card_response=1')",
+                class_="px-2 py-1 text-white bg-red-600 rounded-lg",
+            )["完了"],
+        ],
+        _order_body(order),
+    ]
+
+
+def _order_body(order: order_t) -> list[Element]:
+    return [
+        ul(class_="grow overflow-y-auto px-2 divide-y-2 divide-gray-200")[
+            [
+                li(class_="flex flex-row items-start gap-x-2")[
+                    span(class_="text-green-500 font-bold")["✓"]
+                    if item["supplied_at"]
+                    else span(class_="text-red-500 font-bold")["✗"],
+                    span(class_="break-words")[item["name"]],
+                    span(class_="ml-auto whitespace-nowrap")[
+                        f"{item['price']} x {item['count']}"
+                    ],
+                ]
+                for item in order["items"]  # pyright: ignore[reportGeneralTypeIssues, reportOptionalIterable]
+            ]
+        ],
+        p(class_="flex flex-row mx-1 justify-between px-2")[
+            span(class_="break-words")["合計金額"],
+            span(class_="whitespace-nowrap")[order["total_price"]],  # pyright: ignore[reportArgumentType]
+        ],
+        button(
+            data_on_click=f"confirm('一度取り消した注文 #{order['order_id']} を受け取り待ちに戻しますか？') && @delete('/orders/{order['order_id']}/resolved-at')",
+            class_="mx-10 py-1 border border-gray-600 rounded-lg",
+        )["未受取に戻す"],
+    ]
 
 
 @router.get("/ordered-items/incoming", response_class=HTMLResponse)
 async def get_incoming_ordered_items(request: Request):
+    return HTMLResponse(page_ordered_items_incoming(request))
+
+
+@router.get("/ordered-items/incoming-stream")
+async def ordered_items_incoming_stream(request: Request):
+    gen = partial(_ordered_items_incoming_stream, request)
+    return DatastarFastAPIResponse(gen)
+
+
+async def _ordered_items_incoming_stream(
+    req: Request, sse: ServerSentEventGenerator
+) -> AsyncGenerator[str]:
     ordered_items = await load_ordered_items_incoming()
-    return HTMLResponse(ordered_items_incoming.page(request, ordered_items))
-
-
-@router.get("/ordered-items/incoming-stream", response_class=EventSourceResponse)
-async def ordered_items_incoming_stream(
-    request: Request, accept: Annotated[Literal["text/event-stream"], Header()]
-):
-    _ = accept
-    return EventSourceResponse(_ordered_items_incoming_stream(request))
-
-
-async def _ordered_items_incoming_stream(request: Request):
-    ordered_items = await load_ordered_items_incoming()
-    content = ordered_items_incoming.component(request, ordered_items)
-    yield dict(data=content)
-    try:
+    yield sse.merge_fragments(
+        [str(ordered_items_incoming_component(req, ordered_items))]
+    )
+    async with OrderTable.modified_flag_bc.attach_receiver() as flag_rx:
         while True:
-            async with OrderTable.modified_cond_flag:
-                flag = await OrderTable.modified_cond_flag.wait()
-                if flag & (ModifiedFlag.INCOMING | ModifiedFlag.PUT_BACK):
-                    template = ordered_items_incoming.component_with_sound
-                else:
-                    template = ordered_items_incoming.component
-                ordered_items = await load_ordered_items_incoming()
-                yield dict(data=template(request, ordered_items))
-    except asyncio.CancelledError:
-        yield dict(event="shutdown", data="")
-    finally:
-        yield dict(event="shutdown", data="")
+            flag = await flag_rx.recv()
+            new_order = flag & (ModifiedFlag.INCOMING | ModifiedFlag.PUT_BACK)
+            ordered_items = await load_ordered_items_incoming()
+            yield sse.merge_fragments(
+                [str(ordered_items_incoming_component(req, ordered_items))]
+            )
+            if new_order:
+                yield sse.merge_signals({"_notifRingtone": "true"})
 
 
 @router.post("/orders/{order_id}/products/{product_id}/supplied-at")
 async def supply_products(order_id: int, product_id: int):
-    await supply_and_complete_order_if_done(order_id, product_id)
+    completed = await supply_and_complete_order_if_done(order_id, product_id)
+    if completed:
+        id = f"#ordered-{product_id}"
+    else:
+        id = f"#ordered-item-{order_id}-{product_id}"
+    return event_response(ServerSentEventGenerator.remove_fragments(id))
 
 
 @router.get("/orders/incoming", response_class=HTMLResponse)
 async def get_incoming_orders(request: Request):
+    return HTMLResponse(page_incoming_orders(request))
+
+
+@router.get("/orders/incoming-stream")
+async def incoming_orders_stream():
+    return DatastarFastAPIResponse(_incoming_orders_stream)
+
+
+async def _incoming_orders_stream(sse: ServerSentEventGenerator) -> AsyncGenerator[str]:
     orders = await load_incoming_orders()
-    return HTMLResponse(incoming_orders.page(request, orders))
-
-
-@router.get("/orders/incoming-stream", response_class=EventSourceResponse)
-async def incoming_orders_stream(
-    request: Request, accept: Annotated[Literal["text/event-stream"], Header()]
-):
-    _ = accept
-    return EventSourceResponse(_incoming_orders_stream(request))
-
-
-async def _incoming_orders_stream(
-    request: Request,
-) -> AsyncGenerator[dict[str, str], None]:
-    orders = await load_incoming_orders()
-    content = incoming_orders.component(request, orders)
-    yield dict(data=content)
-    try:
+    yield sse.merge_fragments([str(incoming_orders_component(orders))])
+    async with OrderTable.modified_flag_bc.attach_receiver() as flag_rx:
         while True:
-            async with OrderTable.modified_cond_flag:
-                flag = await OrderTable.modified_cond_flag.wait()
-                if flag & (ModifiedFlag.INCOMING | ModifiedFlag.PUT_BACK):
-                    template = incoming_orders.component_with_sound
-                else:
-                    template = incoming_orders.component
-                orders = await load_incoming_orders()
-                yield dict(data=template(request, orders))
-    except asyncio.CancelledError:
-        yield dict(event="shutdown", data="")
-    finally:
-        yield dict(event="shutdown", data="")
+            flag = await flag_rx.recv()
+            new_order = flag & (ModifiedFlag.INCOMING | ModifiedFlag.PUT_BACK)
+            orders = await load_incoming_orders()
+            yield sse.merge_fragments([str(incoming_orders_component(orders))])
+            if new_order:
+                yield sse.merge_signals({"_notifRingtone": "true"})
 
 
 @router.get("/orders/resolved", response_class=HTMLResponse)
 async def get_resolved_orders(request: Request):
     orders = await load_resolved_orders()
-    return HTMLResponse(resolved_orders.page(request, orders))
+    return HTMLResponse(page_resolved_orders(request, orders))
 
 
 @router.delete("/orders/{order_id}/resolved-at")
 async def reset(order_id: int):
     await OrderTable.reset(order_id)
+    return event_response(
+        ServerSentEventGenerator.remove_fragments(f"#order-{order_id}")
+    )
 
 
-@router.post("/orders/{order_id}/completed-at", response_class=HTMLResponse)
-async def complete(
-    request: Request, order_id: int, card_response: Annotated[bool, Form()] = False
-):
+@router.post("/orders/{order_id}/completed-at")
+async def complete(order_id: int, card_response: bool = False):
     if not card_response:
         await supply_all_and_complete(order_id)
-        return
+        return event_response(
+            ServerSentEventGenerator.remove_fragments(f"#order-{order_id}")
+        )
 
     async with database.transaction():
         await supply_all_and_complete(order_id)
@@ -432,13 +712,12 @@ async def complete(
         detail = f"Order {order_id} not found"
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
-    return HTMLResponse(resolved_orders.completed(request, order))
+    order_card = resolved_order_completed(order)
+    return event_response(ServerSentEventGenerator.merge_fragments([str(order_card)]))
 
 
-@router.post("/orders/{order_id}/canceled-at", response_class=HTMLResponse)
-async def cancel(
-    request: Request, order_id: int, card_response: Annotated[bool, Form()] = False
-):
+@router.post("/orders/{order_id}/canceled-at")
+async def cancel(order_id: int, card_response: bool = False):
     if not card_response:
         await OrderTable.cancel(order_id)
         return
@@ -451,4 +730,5 @@ async def cancel(
         detail = f"Order {order_id} not found"
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
-    return HTMLResponse(resolved_orders.canceled(request, order))
+    order_card = resolved_order_canceled(order)
+    return event_response(ServerSentEventGenerator.merge_fragments([str(order_card)]))

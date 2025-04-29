@@ -1,22 +1,31 @@
-from typing import Annotated
+from typing import Annotated, Iterable
 from uuid import UUID, uuid4
 
+from datastar_py.sse import ServerSentEventGenerator
 import pydantic
-from fastapi import (
-    APIRouter,
-    Cookie,
-    Depends,
-    Form,
-    HTTPException,
-    Request,
-    Response,
-    status,
-)
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
+from htpy import (
+    Element,
+    HTMLElement,
+    a,
+    article,
+    aside,
+    button,
+    div,
+    figcaption,
+    figure,
+    h2,
+    img,
+    li,
+    main,
+    p,
+    span,
+    ul,
+)
 
+from ..components import clock, event_response, page_layout
 from ..store import OrderedItemTable, OrderTable, Product, ProductTable
-from ..templates import hx_post as tmp_hx_post
-from ..templates import macro_template
 
 router = APIRouter()
 
@@ -62,24 +71,215 @@ class OrderSession(pydantic.BaseModel):
                 self.counted_products[product.product_id].count -= 1
 
 
-@macro_template("register.html")
-def tmp_register(products: list[Product], session: OrderSession): ...
+def page_register(req: Request) -> HTMLElement:
+    return page_layout(
+        req,
+        div(id="register", data_on_load="@post('/register')", class_="hidden"),
+        "新規注文 - murchace",
+    )
 
 
-@macro_template("register.html", "order_session")
-def tmp_session(session: OrderSession): ...
+def register(
+    req: Request, products: list[Product], session: OrderSession
+) -> HTMLElement:
+    inner = div(id="register", class_="h-dvh flex flex-row")[
+        main(
+            class_="w-1/2 lg:w-4/6 h-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6 auto-cols-max auto-rows-min gap-2 py-2 pl-10 pr-6 overflow-y-auto"
+        )[
+            [
+                figure(
+                    data_on_click=f"@post('/register/items?product_id={product.product_id}')",
+                    class_="flex flex-col border-4 border-gray-200 rounded-md transition-colors ease-in-out active:bg-gray-100",
+                )[
+                    img(
+                        class_="mx-auto w-full h-auto aspect-square",
+                        src=str(req.url_for("static", path=product.filename)),
+                        alt=product.name,
+                    ),
+                    figcaption(class_="text-center truncate")[product.name],
+                    div(class_="text-center")[product.price_str()],
+                ]
+                for product in products
+            ]
+        ],
+        aside(class_="w-1/2 lg:w-2/6 h-full flex flex-col p-4 justify-between")[
+            div(class_="flex flex-row py-2 justify-around items-center text-xl")[
+                a(
+                    href="/",
+                    class_="px-2 py-1 rounded-sm bg-gray-300 hidden lg:inline-block",
+                )["ホーム"],
+                button(
+                    data_on_click="@delete('/register/items')",
+                    class_="text-white px-2 py-1 rounded-sm bg-red-600 hidden sm:inline-block",
+                    tabindex="0",
+                )["全消去"],
+                div(class_="text-xl hidden md:inline-block")[clock],
+            ],
+            order_session(session),
+        ],
+    ]
+    return page_layout(req, inner, "新規注文 - murchace")
 
 
-@macro_template("register.html", "confirm_modal")
-def tmp_confirm_modal(session: OrderSession): ...
+def order_session(session: OrderSession) -> Element:
+    def item(item_id: UUID, product: Product):
+        return li(id=f"item-{item_id}", class_="flex justify-between")[
+            div(
+                class_="overflow-x-auto whitespace-nowrap sm:flex sm:flex-1 sm:justify-between p-4"
+            )[p(class_="sm:flex-1")[product.name], div[product.price_str()]],
+            div(class_="flex items-center")[
+                button(
+                    data_on_click=f"@delete('/register/items/{item_id}')",
+                    class_="font-bold text-white bg-red-600 px-2 rounded-sm",
+                )["X"]
+            ],
+        ]
+
+    return div(id="order-session", class_="min-h-0 pt-2 flex flex-col")[
+        # `flex-col-reverse` lets the browser to pin scroll to bottom
+        div(class_="flex flex-col-reverse overflow-y-auto")[
+            ul(class_="text-lg divide-y-4 divide-gray-200")[
+                [item(item_id, product) for item_id, product in session.items.items()]
+            ]
+        ],
+        div(class_="flex flex-row p-2 items-center")[
+            div(class_="basis-1/4 text-right lg:text-2xl")[f"{session.total_count} 点"],
+            div(class_="basis-2/4 text-center lg:text-2xl")[
+                f"合計: {session.total_price_str()}"
+            ],
+            button(
+                data_on_click="@get('/register/confirm-modal')",
+                class_="basis-1/4 lg:text-xl text-center text-white p-2 rounded-sm bg-blue-600 disabled:cursor-not-allowed disabled:text-gray-700 disabled:bg-gray-100",
+                disabled=True if session.total_count == 0 else None,
+            )["確定"],
+            div(id="order-modal-container"),
+        ],
+    ]
 
 
-@macro_template("register.html", "issued_modal")
-def tmp_issued_modal(order_id: int, session: OrderSession): ...
+def confirm_modal(session: OrderSession) -> Element:
+    return div(id="order-modal-container")[
+        div(
+            id="order-modal",
+            class_="z-10 fixed inset-0 w-dvw h-dvh py-4 flex items-center bg-gray-500/75",
+            role="dialog",
+            aria_modal="true",
+            onclick="this.remove()",
+        )[
+            div(
+                id="order-confirm-modal",
+                class_="mx-auto w-1/3 h-4/5 p-4 flex flex-col gap-y-2 rounded-lg bg-white [.datastar-settling_&]:scale-50 transition-transform duration-150",
+                onclick="event.stopPropagation()",
+            )[
+                article(
+                    class_="grow min-h-0 flex flex-col gap-y-2 px-3 text-center text-lg"
+                )[
+                    h2(class_="font-semibold")["注文の確定"],
+                    _total(
+                        session.counted_products.values(),
+                        session.total_count,
+                        session.total_price_str(),
+                    ),
+                ],
+                button(
+                    data_on_click="@post('/register')",
+                    class_="w-full py-4 text-center text-xl font-semibold text-white bg-blue-600 rounded-sm",
+                )["確認"],
+                button(
+                    class_="w-full py-4 text-center text-xl font-semibold bg-white border border-gray-300 rounded-sm",
+                    onclick="window['order-modal'].remove()",
+                )["閉じる"],
+            ]
+        ]
+    ]
 
 
-@macro_template("register.html", "error_modal")
-def tmp_error_modal(message: str): ...
+def issued_modal(order_id: int, session: OrderSession) -> Element:
+    return div(id="order-modal-container")[
+        div(
+            id="order-modal",
+            class_="z-10 fixed inset-0 w-dvw h-dvh py-4 flex items-center bg-gray-500/75",
+            role="dialog",
+            aria_modal="true",
+        )[
+            div(
+                class_="mx-auto w-1/3 h-4/5 p-4 flex flex-col gap-y-2 rounded-lg bg-white [.datastar-settling_&]:scale-95 transition-transform duration-150"
+            )[
+                article(
+                    class_="grow min-h-0 flex flex-col gap-y-2 px-3 text-center text-lg"
+                )[
+                    h2(class_="font-semibold")[f"注文番号 #{order_id}"],
+                    _total(
+                        session.counted_products.values(),
+                        session.total_count,
+                        session.total_price_str(),
+                    ),
+                ],
+                button(
+                    data_on_click="@post('/register')",
+                    class_="w-full py-4 text-center text-xl font-semibold text-white bg-green-600 rounded-sm",
+                )["新規"],
+                a(
+                    href="/",
+                    class_="w-full py-4 text-center text-xl font-semibold bg-white border border-gray-300 rounded-sm",
+                )["ホームに戻る"],
+            ]
+        ]
+    ]
+
+
+def _total(
+    counted_products: Iterable[OrderSession.CountedProduct],
+    total_count: int,
+    total_price: str,
+) -> list[Element]:
+    return [
+        ul(class_="grow flex flex-col overflow-y-auto")[
+            (
+                li(class_="flex flex-row items-start gap-x-2")[
+                    span(class_="break-words")[counted_product.name],
+                    span(class_="ml-auto whitespace-nowrap")[
+                        f"{counted_product.price} x {counted_product.count}"
+                    ],
+                ]
+                for counted_product in counted_products
+            )
+        ],
+        div[
+            p(class_="flex flex-row")[
+                span["計"],
+                span(class_="ml-auto whitespace-nowrap")[f"{total_count} 点"],
+            ],
+            p(class_="flex flex-row")[
+                span(class_="break-words")["合計金額"],
+                span(class_="ml-auto")[total_price],
+            ],
+        ],
+    ]
+
+
+def error_modal(message: str) -> Element:
+    return div(id="order-modal-container")[
+        div(
+            id="order-modal",
+            class_="z-10 fixed inset-0 w-dvw h-dvh py-4 flex items-center bg-gray-500/75",
+            role="dialog",
+            aria_modal="true",
+        )[
+            div(
+                id="order-error-modal",
+                class_="mx-auto w-1/3 h-4/5 p-4 flex flex-col gap-y-2 rounded-lg bg-white [.datastar-settling_&]:scale-50 transition-transform duration-150",
+            )[
+                article(
+                    class_="grow min-h-0 flex flex-col gap-y-2 px-3 text-center text-lg"
+                )[h2(class_="font-semibold text-red-500")["エラー"], p[message]],
+                button(
+                    class_="w-full py-4 text-center text-xl font-semibold bg-white border border-gray-300 rounded-sm",
+                    onclick="window['order-modal'].remove()",
+                )["閉じる"],
+            ]
+        ]
+    ]
 
 
 # NOTE: Do NOT store this data in database because the data is transient and should be kept in memory
@@ -101,44 +301,47 @@ async def instruct_creation_of_new_session_or_get_existing_session(
     request: Request, session_key: Annotated[UUID | None, Cookie()] = None
 ):
     if session_key is None or (session := order_sessions.get(session_key)) is None:
-        return HTMLResponse(
-            tmp_hx_post(request, "/register"),
-            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
-            headers={"allow": "POST"},
-        )
+        return HTMLResponse(page_register(request))
 
     products = await ProductTable.select_all()
-    return HTMLResponse(tmp_register(request, products, session))
+    return HTMLResponse(register(request, products, session))
 
 
-@router.get("/register/confirm-modal", response_class=HTMLResponse)
-async def get_confirm_dialog(request: Request, session: SessionDeps):
+@router.get("/register/confirm-modal")
+async def get_confirm_dialog(session: SessionDeps):
     if session.total_count == 0:
-        error_msg = "商品が選択されていません"
-        return HTMLResponse(tmp_error_modal(request, error_msg))
+        fragment = error_modal("商品が選択されていません")
     else:
-        return HTMLResponse(tmp_confirm_modal(request, session))
+        fragment = confirm_modal(session)
+    return event_response(
+        ServerSentEventGenerator.merge_fragments([str(fragment)], settle_duration=150)
+    )
 
 
 @router.post("/register")
 async def create_new_session_or_place_order(
-    request: Request, session_key: Annotated[UUID | None, Cookie()] = None
+    session_key: Annotated[UUID | None, Cookie()] = None,
 ):
     if session_key is None or (session := order_sessions.get(session_key)) is None:
         session_key = _create_new_session()
 
-        LOCATION = "/register"
-        headers = {"location": LOCATION, "hx-location": LOCATION}
-        res = Response(LOCATION, status_code=status.HTTP_201_CREATED, headers=headers)
+        res = event_response(
+            ServerSentEventGenerator.execute_script("location.reload()")
+        )
+        res.headers["location"] = "/register"
         res.set_cookie(SESSION_COOKIE_KEY, str(session_key))
         return res
 
     if session.total_count == 0:
-        error_msg = "商品が選択されていません"
-        return HTMLResponse(tmp_error_modal(request, error_msg))
+        fragment = error_modal("商品が選択されていません")
+        return event_response(
+            ServerSentEventGenerator.merge_fragments(
+                [str(fragment)], settle_duration=150
+            )
+        )
 
     order_sessions.pop(session_key)
-    res = await _place_order(request, session)
+    res = await _place_order(session)
     res.delete_cookie(SESSION_COOKIE_KEY)
     return res
 
@@ -149,35 +352,39 @@ def _create_new_session() -> UUID:
     return session_key
 
 
-async def _place_order(request: Request, session: SessionDeps) -> HTMLResponse:
+async def _place_order(session: SessionDeps) -> Response:
     product_ids = [item.product_id for item in session.items.values()]
     order_id = await OrderedItemTable.issue(product_ids)
     # TODO: add a branch for out of stock error
     await OrderTable.insert(order_id)
-    return HTMLResponse(tmp_issued_modal(request, order_id, session))
+    fragment = issued_modal(order_id, session)
+    return event_response(
+        ServerSentEventGenerator.merge_fragments([str(fragment)], settle_duration=150)
+    )
 
 
 @router.post("/register/items")
-async def add_session_item(
-    request: Request, session: SessionDeps, product_id: Annotated[int, Form()]
-) -> Response:
+async def add_session_item(session: SessionDeps, product_id: int) -> Response:
     if (product := await ProductTable.by_product_id(product_id)) is None:
         raise HTTPException(status_code=404, detail=f"Product {product_id} not found")
 
     session.add(product)
-    return HTMLResponse(tmp_session(request, session))
+    fragment = order_session(session)
+    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
 
 
-@router.delete("/register/items/{item_id}", response_class=HTMLResponse)
-async def delete_session_item(request: Request, session: SessionDeps, item_id: UUID):
+@router.delete("/register/items/{item_id}")
+async def delete_session_item(session: SessionDeps, item_id: UUID):
     session.delete(item_id)
-    return HTMLResponse(tmp_session(request, session))
+    fragment = order_session(session)
+    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
 
 
 @router.delete("/register/items")
-async def clear_session_items(request: Request, session: SessionDeps) -> Response:
+async def clear_session_items(session: SessionDeps) -> Response:
     session.clear()
-    return HTMLResponse(tmp_session(request, session))
+    fragment = order_session(session)
+    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
 
 
 # TODO: add proper path operation for order deferral
@@ -185,7 +392,7 @@ async def clear_session_items(request: Request, session: SessionDeps) -> Respons
 # deferred_order_sessions: dict[int, OrderSession] = {}
 #
 #
-# @router.post("/register/deferred", response_class=HTMLResponse)
+# @router.post("/register/deferred")
 # async def post_defer_session(request: Request, session_key: Annotated[UUID, Cookie()]):
 #     order_session = await order_session_dep(session_key)
 #     if order_session in deferred_order_sessions:

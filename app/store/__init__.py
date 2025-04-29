@@ -39,7 +39,7 @@ def unixepoch(attr: sa_orm.Mapped) -> sqlalchemy.Label:
     return sqlalchemy.literal_column(f"unixepoch({colname})").label(alias)
 
 
-async def supply_and_complete_order_if_done(order_id: int, product_id: int):
+async def supply_and_complete_order_if_done(order_id: int, product_id: int) -> bool:
     async with database.transaction():
         await OrderedItemTable._supply(order_id, product_id)
 
@@ -60,20 +60,18 @@ async def supply_and_complete_order_if_done(order_id: int, product_id: int):
         values = {"completed_at": datetime.now(timezone.utc)}
         completed: bool | None = await database.fetch_val(update_query, values)
 
-    async with OrderTable.modified_cond_flag:
-        flag = ModifiedFlag.SUPPLIED
-        if completed is not None:
-            flag |= ModifiedFlag.RESOLVED
-        OrderTable.modified_cond_flag.notify_all(flag)
+    flag = ModifiedFlag.SUPPLIED
+    if completed is not None:
+        flag |= ModifiedFlag.RESOLVED
+    OrderTable.modified_flag_bc.send(flag)
+    return True if completed is not None else False
 
 
 async def supply_all_and_complete(order_id: int):
     async with database.transaction():
         await OrderedItemTable._supply_all(order_id)
         await OrderTable._complete(order_id)
-    async with OrderTable.modified_cond_flag:
-        FLAG = ModifiedFlag.SUPPLIED | ModifiedFlag.RESOLVED
-        OrderTable.modified_cond_flag.notify_all(FLAG)
+    OrderTable.modified_flag_bc.send(ModifiedFlag.SUPPLIED | ModifiedFlag.RESOLVED)
 
 
 async def _startup_db() -> None:
