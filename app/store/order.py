@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timezone
 from enum import Flag, auto
 from typing import Annotated
@@ -8,6 +7,7 @@ import sqlmodel
 from databases import Database
 from sqlmodel import col
 
+from ..bc import Broadcaster
 from .base import TableBase
 
 
@@ -39,34 +39,8 @@ class ModifiedFlag(Flag):
     PUT_BACK = auto()
 
 
-class ModifiedCondFlag:
-    _condvar: asyncio.Condition
-    _flag: ModifiedFlag
-
-    def __init__(self):
-        self._condvar = asyncio.Condition()
-        self._flag = ModifiedFlag.ORIGINAL
-
-    async def __aenter__(self):
-        await self._condvar.__aenter__()
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        await self._condvar.__aexit__(exc_type, exc, tb)
-
-    async def wait(self) -> ModifiedFlag:
-        await self._condvar.wait()
-        flag = self._flag
-        if len(self._condvar._waiters) == 0:
-            self._flag = ModifiedFlag.ORIGINAL
-        return flag
-
-    def notify_all(self, flag: ModifiedFlag):
-        self._flag |= flag
-        self._condvar.notify_all()
-
-
 class Table:
-    modified_cond_flag = ModifiedCondFlag()
+    modified_flag_bc = Broadcaster(ModifiedFlag.ORIGINAL)
 
     def __init__(self, database: Database):
         self._db = database
@@ -74,8 +48,7 @@ class Table:
     async def insert(self, order_id: int) -> None:
         query = sqlmodel.insert(Order)
         await self._db.execute(query, {"order_id": order_id})
-        async with self.modified_cond_flag:
-            self.modified_cond_flag.notify_all(ModifiedFlag.INCOMING)
+        self.modified_flag_bc.send(ModifiedFlag.INCOMING)
 
     @staticmethod
     def _update(order_id: int) -> sqlalchemy.Update:
@@ -85,8 +58,7 @@ class Table:
     async def cancel(self, order_id: int) -> None:
         values = {"canceled_at": datetime.now(timezone.utc), "completed_at": None}
         await self._db.execute(self._update(order_id), values)
-        async with self.modified_cond_flag:
-            self.modified_cond_flag.notify_all(ModifiedFlag.RESOLVED)
+        self.modified_flag_bc.send(ModifiedFlag.RESOLVED)
 
     async def _complete(self, order_id: int) -> None:
         """
@@ -99,8 +71,7 @@ class Table:
     async def reset(self, order_id: int) -> None:
         values = {"canceled_at": None, "completed_at": None}
         await self._db.execute(self._update(order_id), values)
-        async with self.modified_cond_flag:
-            self.modified_cond_flag.notify_all(ModifiedFlag.PUT_BACK)
+        self.modified_flag_bc.send(ModifiedFlag.PUT_BACK)
 
     async def by_order_id(self, order_id: int) -> Order | None:
         query = sqlmodel.select(Order).where(Order.order_id == order_id)

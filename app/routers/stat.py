@@ -7,12 +7,33 @@ from typing import Annotated, Literal, Mapping
 
 import sqlalchemy
 import sqlmodel
+from datastar_py.sse import ServerSentEventGenerator
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import HTMLResponse
+from htpy import (
+    Element,
+    HTMLElement,
+    a,
+    div,
+    h2,
+    header,
+    img,
+    li,
+    main,
+    p,
+    span,
+    table,
+    tbody,
+    td,
+    th,
+    thead,
+    tr,
+    ul,
+)
 from sqlmodel import col
 
-from ..templates import macro_template
-from ..store import OrderedItem, Order, Product, database, unixepoch
+from ..components import clock, event_response, page_layout
+from ..store import Order, OrderedItem, Product, database, unixepoch
 
 router = APIRouter()
 
@@ -43,16 +64,128 @@ class Stat:
     avg_service_time_recent: str
 
 
-@macro_template("stat.html")
-def tmp_stat(stat: Stat): ...
+def page_stat(req: Request, stat: Stat) -> HTMLElement:
+    inner_header = (
+        header(
+            class_="sticky z-10 inset-0 w-full px-16 py-3 flex gap-3 border-b border-gray-500 bg-white text-2xl"
+        )[
+            ul(class_="grow flex flex-row gap-3")[
+                li(class_="grow")[
+                    a(
+                        href="/",
+                        class_="cursor-pointer px-2 py-1 bg-gray-300 rounded-sm",
+                    )["ホーム"]
+                ],
+                li(class_="hidden sm:block")[
+                    a(
+                        href="/static/stat.csv",
+                        class_="px-2 py-1 text-white bg-blue-600 rounded-lg",
+                    )["売上データの取得"]
+                ],
+                li(class_="hidden sm:block")[clock],
+            ]
+        ],
+    )
+
+    def summary_cell(desc: str, text: str | int):
+        return div(class_="p-2")[
+            h2(class_="text-2xl")[desc], p(class_="text-4xl text-center")[text]
+        ]
+
+    inner_main = main(class_="py-2 px-16")[
+        div(
+            class_="lg:grid lg:grid-cols-3 border-2 border-b border-gray-300 rounded-t-lg divide-y-2 lg:divide-x-2 lg:divide-y-0 divide-gray-300"
+        )[
+            summary_cell("売上", stat.total_sales_all_time),
+            summary_cell("今日の売上", stat.total_sales_today),
+            summary_cell("平均提供時間", stat.avg_service_time_all),
+        ],
+        div(
+            class_="lg:grid lg:grid-cols-3 border-2 border-t border-gray-300 rounded-b-lg divide-y-2 lg:divide-x-2 lg:divide-y-0 divide-gray-300"
+        )[
+            summary_cell("売上点数", stat.total_items_all_time),
+            summary_cell("今日の売上点数", stat.total_items_today),
+            summary_cell("予測待ち時間", stat.avg_service_time_recent),
+        ],
+        div(class_="flex flex-col gap-y-2")[
+            h2(class_="p-2 text-2xl")["商品毎売上情報"], _stat_table(stat)
+        ],
+    ]
+    return page_layout(req, [inner_header, inner_main], "統計 - murchace")
 
 
-@macro_template("wait-estimate.html")
-def tmp_wait_estimate_page(estimate: str, waiting_order_count: int): ...
+def _stat_table(stat: Stat) -> Element:
+    return table[
+        thead[
+            tr(class_="text-xl")[
+                th(class_="border border-b-2 border-gray-300")["画像"],
+                th(class_="border border-b-2 border-gray-300 text-left px-2")["商品名"],
+                th(class_="border border-b-2 border-gray-300")["価格"],
+                th(class_="border border-b-2 border-gray-300")["個数"],
+                th(class_="border border-b-2 border-gray-300")["今日の個数"],
+                th(class_="border border-b-2 border-gray-300")["売上"],
+                th(class_="border border-b-2 border-gray-300")["今日の売上"],
+                th(class_="border border-b-2 border-gray-300")["在庫（未実装）"],
+            ]
+        ],
+        tbody[
+            [
+                tr[
+                    td(class_="border border-gray-300")[
+                        img(
+                            src=f"/static/{sale.filename}",
+                            alt=sale.name,
+                            class_="mx-auto w-16 h-auto aspect-square",
+                        )
+                    ],
+                    td(class_="border border-gray-300 px-2")[sale.name],
+                    td(class_="border border-gray-300 text-center")[sale.price],
+                    td(class_="border border-gray-300 text-center")[sale.count],
+                    td(class_="border border-gray-300 text-center")[sale.count_today],
+                    td(class_="border border-gray-300 text-center")[sale.total_sales],
+                    td(class_="border border-gray-300 text-center")[
+                        sale.total_sales_today
+                    ],
+                    td(class_="border border-gray-300 text-center")[
+                        sale.no_stock if sale.no_stock is not None else "N/A"
+                    ],
+                ]
+                for sale in stat.sales_summary_list
+            ]
+        ],
+    ]
 
 
-@macro_template("wait-estimate.html", "component")
-def tmp_wait_estimate_component(estimate: str, waiting_order_count: int): ...
+def page_wait_estimate(req: Request) -> HTMLElement:
+    inner_header = header(
+        {"data-on-interval__duration.5s.leading": "@get('/wait-estimates')"},
+        class_="sticky z-10 inset-0 w-full px-16 py-3 border-b border-gray-500 bg-white text-2xl",
+    )[
+        ul(class_="flex flex-row")[
+            li(class_="grow")[
+                a(href="/", class_="cursor-pointer px-2 rounded-sm bg-gray-300")[
+                    "ホーム"
+                ]
+            ],
+            li(class_="flex flex-row")[span(class_="mr-1")["現在時刻:"], clock],
+        ]
+    ]
+    inner_main = main(id="wait-estimate")
+    return page_layout(req, [inner_header, inner_main], "予測待ち時間 - murchace")
+
+
+def wait_estimate_component(estimate: str, waiting_order_count: int) -> Element:
+    return main(id="wait-estimate", class_="px-16 py-3")[
+        div(class_="flex-1 p-4 border-2 border-b border-gray-300 rounded-t-lg")[
+            h2(class_="text-4xl")["予測待ち時間"],
+            p(class_="text-9xl text-center")[estimate],
+            p(class_="text-center")["#直近30分の提供時間から算出しています"],
+        ],
+        div(class_="flex-1 p-4 border-2 border-t border-gray-300 rounded-b-lg")[
+            h2(class_="text-4xl")["受取待ち"],
+            p(class_="text-9xl text-center")[f"{waiting_order_count}件"],
+        ],
+    ]
 
 
 def convert_unixepoch_to_localtime(unixepoch_time: int) -> str:
@@ -240,7 +373,7 @@ async def construct_stat() -> Stat:
 @router.get("/stat", response_class=HTMLResponse)
 async def get_stat(request: Request):
     await export_orders()
-    return HTMLResponse(tmp_stat(request, await construct_stat()))
+    return HTMLResponse(page_stat(request, await construct_stat()))
 
 
 WAITING_ORDER_COUNT_QUERY: sqlalchemy.Compiled = (
@@ -252,8 +385,11 @@ WAITING_ORDER_COUNT_QUERY: sqlalchemy.Compiled = (
 
 @router.get("/wait-estimates", response_class=HTMLResponse)
 async def get_estimates(
-    request: Request, hx_request: Annotated[str | None, Header()] = None
+    request: Request, datastar_request: Annotated[str | None, Header()] = None
 ):
+    if datastar_request != "true":
+        return HTMLResponse(page_wait_estimate(request))
+
     async with database.transaction():
         estimate_record = await database.fetch_one(str(AvgServiceTimeQuery.recent()))
         waiting_order_count = await database.fetch_val(str(WAITING_ORDER_COUNT_QUERY))
@@ -266,8 +402,5 @@ async def get_estimates(
     else:
         estimate_str = AvgServiceTimeQuery.seconds_to_jpn_mmss(estimate)
 
-    if hx_request == "true":
-        template = tmp_wait_estimate_component
-    else:
-        template = tmp_wait_estimate_page
-    return HTMLResponse(template(request, estimate_str, waiting_order_count))
+    fragment = wait_estimate_component(estimate_str, waiting_order_count)
+    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))

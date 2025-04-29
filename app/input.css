@@ -2,4 +2,4 @@
 https://tailwindcss.com/docs/detecting-classes-in-source-files
 */
 
-@import "tailwindcss" source("./templates");
+@import "tailwindcss";

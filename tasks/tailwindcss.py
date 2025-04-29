@@ -8,10 +8,11 @@ from doit.tools import LongRunning, config_changed
 
 from .task_dict import TaskDict, TaskDictGen
 
-# List of available tailwindcss versions:
+# Manually update the version string.
+# List of available tailwindcss versions are here:
 # https://github.com/tailwindlabs/tailwindcss/releases
-# Or set "latest" to get the most up-to-date stable release
-VERSION = os.environ.get("TAILWINDCSS_VERSION", "v4.0.0")
+# Setting it to "latest" might lead to an unreproducible build.
+VERSION = os.environ.get("TAILWINDCSS_VERSION", "v4.0.12")
 BINARY_PATH = Path(__file__).parent.resolve() / "bin" / f"tailwindcss-{VERSION}"
 BINARY_SYMLINK_PATH = BINARY_PATH.parent / "tailwindcss"
 
@@ -30,10 +31,11 @@ TAILWIND_INPUT = Path("app/input.css")
 def task_tailwind_build() -> TaskDictGen:
     """Generate `styles.min.css`."""
     template_files = Path("app/templates").glob("**/*.html")
-    file_dep = [BINARY_PATH, Path("tailwind.config.js"), TAILWIND_INPUT]
+    file_dep = [BINARY_PATH, TAILWIND_INPUT]
     file_dep.extend(template_files)
     output = "static/styles.min.css"
     cmd = [BINARY_PATH, "--minify", "-i", TAILWIND_INPUT, "-o", output]
+    # TODO: abort the cmd action when the tailwindcss binary does not exist
     task: TaskDict = {"file_dep": file_dep, "actions": [cmd]}
     # TODO: Figure out a way to assign the same target to two tasks.
     # The issue arrises because using `"targets": ["static/styles.min.css"]`
@@ -49,6 +51,7 @@ def task_tailwind_watch() -> TaskDictGen:
     cmd = LongRunning(
         [BINARY_PATH, "--watch", "-i", TAILWIND_INPUT, "-o", output], shell=False
     )
+    # TODO: abort the cmd action when the tailwindcss binary does not exist
     yield {"basename": "tailwind-watch", "actions": [cmd]}
     yield {"basename": "tw", "actions": [cmd]}
 
