@@ -96,18 +96,18 @@ $ source .venv/bin/activate
 
 ## 技術スタック
 
-murchace は htmx、Tailwind CSS、FastAPI で構築されています。
+murchace は data-star、Tailwind CSS、FastAPI で構築されています。
 クライアントの要望に応じて、FastAPI サーバで注文情報を管理します。
-UI は基本 HTML で記述します。
+UI は基本 htpy (HTML) で記述します。
 
 ### 参考リンク
 
 - FastAPI: https://fastapi.tiangolo.com/ja/ (日本語)
 - FastAPI: https://fastapi.tiangolo.com/ (English)
 - Python の型チートシート: https://mypy.readthedocs.io/en/latest/cheat_sheet_py3.html (English)
-- テンプレート言語: https://jinja.palletsprojects.com/en/3.1.x/ (English)
+- htpy: https://htpy.dev/usage/ (English)
 - Tailwind CSS: https://tailwindcss.com/docs/utility-first (English)
-- htmx: https://htmx.org/docs/ (English)
+- data-star: https://data-star.dev/guide/getting_started (English)
 - 非同期データベースライブラリ: https://www.encode.io/databases/ (English)
 - SQL のドメイン固有言語: https://docs.sqlalchemy.org/en/20/core/ (English)
 
@@ -116,9 +116,6 @@ UI は基本 HTML で記述します。
 - [charliermarsh.ruff](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff): 高速な Python LSP
 - [ms-pyright.pyright](https://marketplace.visualstudio.com/items?itemName=ms-pyright.pyright): Python の型チェックに特化した LSP (VSCode の場合は Pylance でも可)
 - [ms-python.debugpy](https://marketplace.visualstudio.com/items?itemName=ms-python.debugpy): Python のデバッグサポート
-- [monosans.djlint](https://marketplace.visualstudio.com/items?itemName=monosans.djlint): Jinja テンプレートのリンター
-- [otovo-oss.htmx-tags](https://marketplace.visualstudio.com/items?itemName=otovo-oss.htmx-tags): htmx の拡張属性の自動補完
-- [CraigRBroughton.htmx-attributes](https://marketplace.visualstudio.com/items?itemName=CraigRBroughton.htmx-attributes): htmx の拡張属性の自動補完（代替プラグイン）
 - [bradlc.vscode-tailwindcss](https://marketplace.visualstudio.com/items?itemName=bradlc.vscode-tailwindcss): Tailwind CSS の LSP
 
 Vim、Emacs、その他のエディタでの環境構築については説明を省きます。

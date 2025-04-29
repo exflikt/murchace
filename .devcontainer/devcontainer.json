@@ -17,9 +17,6 @@
                 "charliermarsh.ruff",
                 "ms-pyright.pyright",
                 "ms-python.debugpy",
-                "monosans.djlint",
-                "otovo-oss.htmx-tags",
-                "CraigRBroughton.htmx-attributes",
                 "bradlc.vscode-tailwindcss",
                 "ms-azuretools.vscode-docker"
             ],
