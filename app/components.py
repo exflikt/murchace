@@ -1,16 +1,9 @@
-from typing import Any
-
-from datastar_py.sse import SSE_HEADERS
-from fastapi import Request, Response
+from fastapi import Request
 from htpy import Element, HTMLElement, Node, body, head, html, link, meta, script
 from htpy import title as title_elt
 from markupsafe import Markup
 
 from .env import DEBUG
-
-
-def event_response(content: Any):
-    return Response(content, headers=SSE_HEADERS)
 
 
 def page_layout(

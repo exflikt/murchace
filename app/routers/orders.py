@@ -1,12 +1,13 @@
 import asyncio
 from datetime import datetime
 from functools import partial
-from typing import Any, AsyncGenerator, Awaitable, Callable, Literal, Mapping
+from typing import Any, AsyncIterable, Awaitable, Callable, Literal, Mapping
 
 import sqlalchemy
-import sqlmodel
-from datastar_py.responses import DatastarFastAPIResponse
-from datastar_py.sse import ServerSentEventGenerator
+import sqlalchemy.sql.expression as sa_exp
+from datastar_py.fastapi import DatastarResponse
+from datastar_py.sse import DatastarEvent
+from datastar_py.sse import ServerSentEventGenerator as SSE
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 from htpy import (
@@ -26,9 +27,9 @@ from htpy import (
     ul,
 )
 from markupsafe import Markup
-from sqlmodel import col
+from sqlalchemy.sql.functions import func as sa_func
 
-from ..components import clock, event_response, page_layout
+from ..components import clock, page_layout
 from ..store import (
     Order,
     OrderedItem,
@@ -134,17 +135,17 @@ async def _agen_query_executor[T](
         list_cb(lst)
 
 
-query_ordered_items_incoming: sqlalchemy.Select = (
-    sqlmodel.select(OrderedItem.order_id, OrderedItem.product_id)
-    .add_columns(sqlmodel.func.count(col(OrderedItem.product_id)).label("count"))
-    .where(col(OrderedItem.supplied_at).is_(None))  # Filter out supplied items
-    .group_by(col(OrderedItem.order_id), col(OrderedItem.product_id))
-    .select_from(sqlmodel.join(OrderedItem, Product))
-    .add_columns(col(Product.name), col(Product.filename))
+query_ordered_items_incoming: sa_exp.Select = (
+    sa_exp.select(OrderedItem.order_id, OrderedItem.product_id)
+    .add_columns(sa_func.count(OrderedItem.product_id).label("count"))
+    .where(OrderedItem.supplied_at.is_(None))  # Filter out supplied items
+    .group_by(OrderedItem.order_id, OrderedItem.product_id)
+    .select_from(sa_exp.join(OrderedItem, Product))
+    .add_columns(Product.name, Product.filename)
     .join(Order)
-    .add_columns(unixepoch(col(Order.ordered_at)))
-    .where(col(Order.canceled_at).is_(None) & col(Order.completed_at).is_(None))
-    .order_by(col(OrderedItem.product_id).asc(), col(OrderedItem.order_id).asc())
+    .add_columns(unixepoch(Order.ordered_at))
+    .where(Order.canceled_at.is_(None) & Order.completed_at.is_(None))
+    .order_by(OrderedItem.product_id.asc(), OrderedItem.order_id.asc())
 )
 
 type ordered_item_t = dict[str, int | str | list[dict[str, int | str]]]
@@ -267,45 +268,45 @@ type item_t = dict[str, int | str | None]
 type order_t = dict[str, int | list[item_t] | str | datetime | None]
 
 
-query_incoming: sqlalchemy.Select = (
+query_incoming: sa_exp.Select = (
     # Query from the orders table
-    sqlmodel.select(Order.order_id)
-    .group_by(col(Order.order_id))
-    .order_by(col(Order.order_id).asc())
-    .add_columns(unixepoch(col(Order.ordered_at)))
+    sa_exp.select(Order.order_id)
+    .group_by(Order.order_id)
+    .order_by(Order.order_id.asc())
+    .add_columns(unixepoch(Order.ordered_at))
     # Filter out canceled/completed orders
-    .where(col(Order.canceled_at).is_(None) & col(Order.completed_at).is_(None))
+    .where(Order.canceled_at.is_(None) & Order.completed_at.is_(None))
     # Query the list of ordered items
-    .select_from(sqlmodel.join(Order, OrderedItem))
-    .add_columns(col(OrderedItem.product_id), unixepoch(col(OrderedItem.supplied_at)))
-    .group_by(col(OrderedItem.product_id))
-    .order_by(col(OrderedItem.product_id).asc())
-    .add_columns(sqlmodel.func.count(col(OrderedItem.product_id)).label("count"))
+    .select_from(sa_exp.join(Order, OrderedItem))
+    .add_columns(OrderedItem.product_id, unixepoch(OrderedItem.supplied_at))
+    .group_by(OrderedItem.product_id)
+    .order_by(OrderedItem.product_id.asc())
+    .add_columns(sa_func.count(OrderedItem.product_id).label("count"))
     # Query product name
     .join(Product)
-    .add_columns(col(Product.name))
+    .add_columns(Product.name)
 )
 
 
-query_resolved: sqlalchemy.Select = (
+query_resolved: sa_exp.Select = (
     # Query from the orders table
-    sqlmodel.select(Order.order_id)
-    .group_by(col(Order.order_id))
-    .order_by(col(Order.order_id).asc())
-    .add_columns(unixepoch(col(Order.ordered_at)))
+    sa_exp.select(Order.order_id)
+    .group_by(Order.order_id)
+    .order_by(Order.order_id.asc())
+    .add_columns(unixepoch(Order.ordered_at))
     # Query canceled/completed orders
-    .where(col(Order.canceled_at).isnot(None) | col(Order.completed_at).isnot(None))
-    .add_columns(unixepoch(col(Order.canceled_at)))
-    .add_columns(unixepoch(col(Order.completed_at)))
+    .where(Order.canceled_at.isnot(None) | Order.completed_at.isnot(None))
+    .add_columns(unixepoch(Order.canceled_at))
+    .add_columns(unixepoch(Order.completed_at))
     # Query the list of ordered items
-    .select_from(sqlmodel.join(Order, OrderedItem))
-    .add_columns(col(OrderedItem.product_id), unixepoch(col(OrderedItem.supplied_at)))
-    .group_by(col(OrderedItem.product_id))
-    .order_by(col(OrderedItem.product_id).asc())
-    .add_columns(sqlmodel.func.count(col(OrderedItem.product_id)).label("count"))
+    .select_from(sa_exp.join(Order, OrderedItem))
+    .add_columns(OrderedItem.product_id, unixepoch(OrderedItem.supplied_at))
+    .group_by(OrderedItem.product_id)
+    .order_by(OrderedItem.product_id.asc())
+    .add_columns(sa_func.count(OrderedItem.product_id).label("count"))
     # Query product name and price
     .join(Product)
-    .add_columns(col(Product.name), col(Product.price))
+    .add_columns(Product.name, Product.price)
 )
 
 
@@ -417,7 +418,7 @@ load_resolved_orders = _orders_loader(
 
 
 async def load_one_resolved_order(order_id: int) -> order_t | None:
-    query = query_resolved.where(col(Order.order_id) == order_id)
+    query = query_resolved.where(Order.order_id == order_id)
 
     rows_agen = database.iterate(query)
     if (row := await anext(rows_agen, None)) is None:
@@ -626,27 +627,22 @@ async def get_incoming_ordered_items(request: Request):
 
 @router.get("/ordered-items/incoming-stream")
 async def ordered_items_incoming_stream(request: Request):
-    gen = partial(_ordered_items_incoming_stream, request)
-    return DatastarFastAPIResponse(gen)
+    return DatastarResponse(_ordered_items_incoming_stream(request))
 
 
-async def _ordered_items_incoming_stream(
-    req: Request, sse: ServerSentEventGenerator
-) -> AsyncGenerator[str]:
+async def _ordered_items_incoming_stream(req: Request) -> AsyncIterable[DatastarEvent]:
     ordered_items = await load_ordered_items_incoming()
-    yield sse.merge_fragments(
-        [str(ordered_items_incoming_component(req, ordered_items))]
-    )
+    yield SSE.patch_elements(ordered_items_incoming_component(req, ordered_items))
     async with OrderTable.modified_flag_bc.attach_receiver() as flag_rx:
         while True:
             flag = await flag_rx.recv()
             new_order = flag & (ModifiedFlag.INCOMING | ModifiedFlag.PUT_BACK)
             ordered_items = await load_ordered_items_incoming()
-            yield sse.merge_fragments(
-                [str(ordered_items_incoming_component(req, ordered_items))]
+            yield SSE.patch_elements(
+                ordered_items_incoming_component(req, ordered_items)
             )
             if new_order:
-                yield sse.merge_signals({"_notifRingtone": "true"})
+                yield SSE.patch_signals({"_notifRingtone": "true"})
 
 
 @router.post("/orders/{order_id}/products/{product_id}/supplied-at")
@@ -656,7 +652,7 @@ async def supply_products(order_id: int, product_id: int):
         id = f"#ordered-{product_id}"
     else:
         id = f"#ordered-item-{order_id}-{product_id}"
-    return event_response(ServerSentEventGenerator.remove_fragments(id))
+    return DatastarResponse(SSE.remove_elements(id))
 
 
 @router.get("/orders/incoming", response_class=HTMLResponse)
@@ -666,20 +662,20 @@ async def get_incoming_orders(request: Request):
 
 @router.get("/orders/incoming-stream")
 async def incoming_orders_stream():
-    return DatastarFastAPIResponse(_incoming_orders_stream)
+    return DatastarResponse(_incoming_orders_stream())
 
 
-async def _incoming_orders_stream(sse: ServerSentEventGenerator) -> AsyncGenerator[str]:
+async def _incoming_orders_stream() -> AsyncIterable[DatastarEvent]:
     orders = await load_incoming_orders()
-    yield sse.merge_fragments([str(incoming_orders_component(orders))])
+    yield SSE.patch_elements(incoming_orders_component(orders))
     async with OrderTable.modified_flag_bc.attach_receiver() as flag_rx:
         while True:
             flag = await flag_rx.recv()
             new_order = flag & (ModifiedFlag.INCOMING | ModifiedFlag.PUT_BACK)
             orders = await load_incoming_orders()
-            yield sse.merge_fragments([str(incoming_orders_component(orders))])
+            yield SSE.patch_elements(incoming_orders_component(orders))
             if new_order:
-                yield sse.merge_signals({"_notifRingtone": "true"})
+                yield SSE.patch_signals({"_notifRingtone": "true"})
 
 
 @router.get("/orders/resolved", response_class=HTMLResponse)
@@ -691,18 +687,14 @@ async def get_resolved_orders(request: Request):
 @router.delete("/orders/{order_id}/resolved-at")
 async def reset(order_id: int):
     await OrderTable.reset(order_id)
-    return event_response(
-        ServerSentEventGenerator.remove_fragments(f"#order-{order_id}")
-    )
+    return DatastarResponse(SSE.remove_elements(f"#order-{order_id}"))
 
 
 @router.post("/orders/{order_id}/completed-at")
 async def complete(order_id: int, card_response: bool = False):
     if not card_response:
         await supply_all_and_complete(order_id)
-        return event_response(
-            ServerSentEventGenerator.remove_fragments(f"#order-{order_id}")
-        )
+        return DatastarResponse(SSE.remove_elements(f"#order-{order_id}"))
 
     async with database.transaction():
         await supply_all_and_complete(order_id)
@@ -713,7 +705,7 @@ async def complete(order_id: int, card_response: bool = False):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
     order_card = resolved_order_completed(order)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(order_card)]))
+    return DatastarResponse(SSE.patch_elements(order_card))
 
 
 @router.post("/orders/{order_id}/canceled-at")
@@ -731,4 +723,4 @@ async def cancel(order_id: int, card_response: bool = False):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
     order_card = resolved_order_canceled(order)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(order_card)]))
+    return DatastarResponse(SSE.patch_elements(order_card))

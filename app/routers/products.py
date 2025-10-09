@@ -1,6 +1,7 @@
 from typing import Annotated
 
-from datastar_py.sse import ServerSentEventGenerator
+from datastar_py.fastapi import DatastarResponse
+from datastar_py.sse import ServerSentEventGenerator as SSE
 from fastapi import APIRouter, Form, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from htpy import (
@@ -22,7 +23,7 @@ from htpy import (
     ul,
 )
 
-from ..components import event_response, page_layout
+from ..components import page_layout
 from ..store import Product, ProductTable, delete_product
 
 router = APIRouter()
@@ -283,7 +284,7 @@ async def new_product(
     #
     # # return event_Response(product_card(product))
 
-    return event_response(ServerSentEventGenerator.execute_script("location.reload()"))
+    return DatastarResponse(SSE.execute_script("location.reload()"))
 
 
 @router.post("/products/{prev_product_id}")
@@ -314,13 +315,13 @@ async def update_product(
     #
     # # return event_response(templates.product.card(product))
 
-    return event_response(ServerSentEventGenerator.execute_script("location.reload()"))
+    return DatastarResponse(SSE.execute_script("location.reload()"))
 
 
 @router.delete("/products/{product_id}", response_class=StreamingResponse)
 async def delete(product_id: int):
     await delete_product(product_id)
-    return event_response(ServerSentEventGenerator.execute_script("location.reload()"))
+    return DatastarResponse(SSE.execute_script("location.reload()"))
 
 
 @router.get("/products/{product_id}/editor", response_class=StreamingResponse)
@@ -331,14 +332,12 @@ async def get_product_editor(request: Request, product_id: int):
         detail = f"Product {product_id} not found"
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
-    fragment = fragment_editor(request, product)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
+    return DatastarResponse(SSE.patch_elements(fragment_editor(request, product)))
 
 
 @router.get("/product-editor")
 async def get_empty_product_editor(request: Request):
-    fragment = fragment_empty_editor(request)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
+    return DatastarResponse(SSE.patch_elements(fragment_empty_editor(request)))
 
 
 # TODO: This path is defined temporally for convenience and should be removed in the future.

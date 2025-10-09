@@ -1,8 +1,9 @@
+from dataclasses import dataclass
 from typing import Annotated, Iterable
 from uuid import UUID, uuid4
 
-from datastar_py.sse import ServerSentEventGenerator
-import pydantic
+from datastar_py.fastapi import DatastarResponse
+from datastar_py.sse import ServerSentEventGenerator as SSE
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from htpy import (
@@ -24,22 +25,24 @@ from htpy import (
     ul,
 )
 
-from ..components import clock, event_response, page_layout
+from ..components import clock, page_layout
 from ..store import OrderedItemTable, OrderTable, Product, ProductTable
 
 router = APIRouter()
 
 
-class OrderSession(pydantic.BaseModel):
-    class CountedProduct(pydantic.BaseModel):
+@dataclass
+class OrderSession:
+    @dataclass
+    class CountedProduct:
         name: str
         price: str
-        count: int = pydantic.Field(default=1)
+        count: int = 1
 
-    items: dict[UUID, Product] = pydantic.Field(default_factory=dict)
-    counted_products: dict[int, CountedProduct] = pydantic.Field(default_factory=dict)
-    total_count: int = pydantic.Field(default=0)
-    total_price: int = pydantic.Field(default=0)
+    items: dict[UUID, Product]
+    counted_products: dict[int, CountedProduct]
+    total_count: int = 0
+    total_price: int = 0
 
     def clear(self):
         self.total_count = 0
@@ -168,7 +171,7 @@ def confirm_modal(session: OrderSession) -> Element:
         )[
             div(
                 id="order-confirm-modal",
-                class_="mx-auto w-1/3 h-4/5 p-4 flex flex-col gap-y-2 rounded-lg bg-white [.datastar-settling_&]:scale-50 transition-transform duration-150",
+                class_="mx-auto w-1/3 h-4/5 p-4 flex flex-col gap-y-2 rounded-lg bg-white animate-[scale-50_150ms_ease-in]",
                 onclick="event.stopPropagation()",
             )[
                 article(
@@ -203,7 +206,7 @@ def issued_modal(order_id: int, session: OrderSession) -> Element:
             aria_modal="true",
         )[
             div(
-                class_="mx-auto w-1/3 h-4/5 p-4 flex flex-col gap-y-2 rounded-lg bg-white [.datastar-settling_&]:scale-95 transition-transform duration-150"
+                class_="mx-auto w-1/3 h-4/5 p-4 flex flex-col gap-y-2 rounded-lg bg-white animate-[scale-95_150ms_ease-in]"
             )[
                 article(
                     class_="grow min-h-0 flex flex-col gap-y-2 px-3 text-center text-lg"
@@ -313,9 +316,7 @@ async def get_confirm_dialog(session: SessionDeps):
         fragment = error_modal("商品が選択されていません")
     else:
         fragment = confirm_modal(session)
-    return event_response(
-        ServerSentEventGenerator.merge_fragments([str(fragment)], settle_duration=150)
-    )
+    return DatastarResponse(SSE.patch_elements(fragment))
 
 
 @router.post("/register")
@@ -325,20 +326,14 @@ async def create_new_session_or_place_order(
     if session_key is None or (session := order_sessions.get(session_key)) is None:
         session_key = _create_new_session()
 
-        res = event_response(
-            ServerSentEventGenerator.execute_script("location.reload()")
-        )
+        res = DatastarResponse(SSE.execute_script("location.reload()"))
         res.headers["location"] = "/register"
         res.set_cookie(SESSION_COOKIE_KEY, str(session_key))
         return res
 
     if session.total_count == 0:
         fragment = error_modal("商品が選択されていません")
-        return event_response(
-            ServerSentEventGenerator.merge_fragments(
-                [str(fragment)], settle_duration=150
-            )
-        )
+        return DatastarResponse(SSE.patch_elements(fragment))
 
     order_sessions.pop(session_key)
     res = await _place_order(session)
@@ -348,7 +343,7 @@ async def create_new_session_or_place_order(
 
 def _create_new_session() -> UUID:
     session_key = uuid4()
-    order_sessions[session_key] = OrderSession()
+    order_sessions[session_key] = OrderSession(items={}, counted_products={})
     return session_key
 
 
@@ -358,9 +353,7 @@ async def _place_order(session: SessionDeps) -> Response:
     # TODO: add a branch for out of stock error
     await OrderTable.insert(order_id)
     fragment = issued_modal(order_id, session)
-    return event_response(
-        ServerSentEventGenerator.merge_fragments([str(fragment)], settle_duration=150)
-    )
+    return DatastarResponse(SSE.patch_elements(fragment))
 
 
 @router.post("/register/items")
@@ -370,21 +363,21 @@ async def add_session_item(session: SessionDeps, product_id: int) -> Response:
 
     session.add(product)
     fragment = order_session(session)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
+    return DatastarResponse(SSE.patch_elements(fragment))
 
 
 @router.delete("/register/items/{item_id}")
 async def delete_session_item(session: SessionDeps, item_id: UUID):
     session.delete(item_id)
     fragment = order_session(session)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
+    return DatastarResponse(SSE.patch_elements(fragment))
 
 
 @router.delete("/register/items")
 async def clear_session_items(session: SessionDeps) -> Response:
     session.clear()
     fragment = order_session(session)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
+    return DatastarResponse(SSE.patch_elements(fragment))
 
 
 # TODO: add proper path operation for order deferral

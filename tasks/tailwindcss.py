@@ -2,17 +2,18 @@
 
 import os
 from pathlib import Path
+from typing import Generator
 
-from doit.action import TaskFailed
+from doit.action import PythonAction, TaskFailed
 from doit.tools import LongRunning, config_changed
 
-from .task_dict import TaskDict, TaskDictGen
+from .task_dict import TaskDict
 
 # Manually update the version string.
 # List of available tailwindcss versions are here:
 # https://github.com/tailwindlabs/tailwindcss/releases
-# Setting it to "latest" might lead to an unreproducible build.
-VERSION = os.environ.get("TAILWINDCSS_VERSION", "v4.0.12")
+# Setting it to "latest" will lead to an unreproducible build.
+VERSION = os.environ.get("TAILWINDCSS_VERSION", "v4.1.14")
 BINARY_PATH = Path(__file__).parent.resolve() / "bin" / f"tailwindcss-{VERSION}"
 BINARY_SYMLINK_PATH = BINARY_PATH.parent / "tailwindcss"
 
@@ -26,31 +27,36 @@ def task__tailwind_install() -> TaskDict:
 
 
 TAILWIND_INPUT = Path("app/input.css")
+assert TAILWIND_INPUT.exists()
+CMD_FMT = [BINARY_PATH, "--optimize", "-i", TAILWIND_INPUT]
+CMD_MIN = CMD_FMT + ["--minify"]
 
 
-def task_tailwind_build() -> TaskDictGen:
+def task_tailwind_build() -> Generator[TaskDict, None, TaskFailed | None]:
     """Generate `styles.min.css`."""
-    template_files = Path("app/templates").glob("**/*.html")
-    file_dep = [BINARY_PATH, TAILWIND_INPUT]
-    file_dep.extend(template_files)
-    output = "static/styles.min.css"
-    cmd = [BINARY_PATH, "--minify", "-i", TAILWIND_INPUT, "-o", output]
-    # TODO: abort the cmd action when the tailwindcss binary does not exist
-    task: TaskDict = {"file_dep": file_dep, "actions": [cmd]}
+    if not BINARY_PATH.exists():
+        return TaskFailed(f"{BINARY_PATH} does not exist; run `doit dev` first")
+    CSS_MIN = Path("static/styles.min.css")
+    # NOTE: unfortunately as of v4.1.14, tailwindcss produces different
+    # results on the first invocation and the subsequent invocations, so
+    # we remove the min file before the build to mimic reproducibility
+    # TODO: find the issue related to reproducibility or file one
+    rm_file = PythonAction(lambda: CSS_MIN.unlink(missing_ok=True))
+    cmds = [rm_file, CMD_MIN + ["-o", CSS_MIN]]
+
     # TODO: Figure out a way to assign the same target to two tasks.
     # The issue arrises because using `"targets": ["static/styles.min.css"]`
     # more than twice for different basename tasks is disallowed. It would be
     # ideal if we could somehow get around that limitation.
-    yield {"basename": "tailwind-build", **task}
-    yield {"basename": "tb", **task}
+    yield {"basename": "tailwind-build", "actions": cmds}
+    yield {"basename": "tb", "actions": cmds}
 
 
-def task_tailwind_watch() -> TaskDictGen:
-    """Generate `styles.css` every time template files change."""
-    output = "static/styles.css"
-    cmd = LongRunning(
-        [BINARY_PATH, "--watch", "-i", TAILWIND_INPUT, "-o", output], shell=False
-    )
+def task_tailwind_watch() -> Generator[TaskDict, None, TaskFailed | None]:
+    """Generate `styles.css` every time files change."""
+    if not BINARY_PATH.exists():
+        return TaskFailed(f"{BINARY_PATH} does not exist; run `doit dev` first")
+    cmd = LongRunning(CMD_FMT + ["-w", "-o", "static/styles.css"], shell=False)
     # TODO: abort the cmd action when the tailwindcss binary does not exist
     yield {"basename": "tailwind-watch", "actions": [cmd]}
     yield {"basename": "tw", "actions": [cmd]}
@@ -66,7 +72,7 @@ def install_binary() -> None:
     import urllib.request
     from urllib.error import HTTPError
 
-    os.makedirs(BINARY_PATH.parent, exist_ok=True)
+    BINARY_PATH.parent.mkdir(exist_ok=True)
     BINARY_PATH.unlink(missing_ok=True)
     BINARY_SYMLINK_PATH.unlink(missing_ok=True)
 
@@ -79,12 +85,12 @@ def install_binary() -> None:
             raise Exception(
                 f"Couldn't find Tailwind CSS binary for version {VERSION}. "
                 f"Please check if this version exists at "
-                f"https://github.com/tailwindlabs/tailwindcss/releases."
+                f"https://github.com/tailwindlabs/tailwindcss/releases"
             )
         raise err
 
     BINARY_PATH.chmod(BINARY_PATH.stat().st_mode | stat.S_IEXEC)  # Set executable bit
-    BINARY_SYMLINK_PATH.symlink_to(BINARY_PATH.relative_to(BINARY_PATH.parent))
+    BINARY_SYMLINK_PATH.symlink_to(BINARY_PATH.name)
 
 
 def get_download_url(version: str) -> str:
@@ -115,16 +121,18 @@ def comparison_test() -> TaskFailed | None:
 
     tmpfile = Path("output")
     try:
-        subprocess.run([BINARY_PATH, "-i", TAILWIND_INPUT, "-o", tmpfile], check=True)
+        # NOTE: unfortunately as of v4.1.14, tailwindcss produces different
+        # results on the first invocation and the subsequent invocations, so
+        # we run the command twice to mimic reproducibility
+        # TODO: find the issue related to reproducibility or file one
+        subprocess.run(CMD_FMT + ["-o", tmpfile], check=True)
+        subprocess.run(CMD_FMT + ["-o", tmpfile], check=True)
         subprocess.run(["diff", "static/styles.css", tmpfile], check=True)
-        subprocess.run(
-            [BINARY_PATH, "--minify", "-i", TAILWIND_INPUT, "-o", tmpfile],
-            check=True,
-        )
+        tmpfile.unlink()
+        subprocess.run(CMD_MIN + ["-o", tmpfile], check=True)
+        print(str(" ".join(str(arg) for arg in CMD_MIN + ["-o", tmpfile])))
         subprocess.run(["diff", "static/styles.min.css", tmpfile], check=True)
-    except subprocess.CalledProcessError:
-        subprocess.run(["rm", tmpfile], check=True)
-        # TODO: come up with a sensible error msg
-        return TaskFailed("")
-    finally:
-        subprocess.run(["rm", tmpfile], check=True)
+    except subprocess.CalledProcessError as e:
+        tmpfile.unlink(missing_ok=True)
+        return TaskFailed(e)
+    tmpfile.unlink()

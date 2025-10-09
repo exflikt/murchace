@@ -9,7 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
+import sqlalchemy.sql.sqltypes
 
 
 # revision identifiers, used by Alembic.
@@ -24,9 +24,9 @@ def upgrade() -> None:
         "products",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("product_id", sa.Integer(), nullable=False),
-        sa.Column("name", sqlmodel.sql.sqltypes.AutoString(length=40), nullable=False),
+        sa.Column("name", sqlalchemy.sql.sqltypes.String(length=40), nullable=False),
         sa.Column(
-            "filename", sqlmodel.sql.sqltypes.AutoString(length=100), nullable=False
+            "filename", sqlalchemy.sql.sqltypes.String(length=100), nullable=False
         ),
         sa.Column("price", sa.Integer(), nullable=False),
         sa.Column("no_stock", sa.Integer(), nullable=True),

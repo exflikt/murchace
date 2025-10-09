@@ -16,6 +16,9 @@
 # doit tabcompletion --shell zsh > ~/.local/share/zsh/zfunc/_doit
 # ```
 
+import os
+from typing import Generator
+
 from doit.action import TaskFailed
 from doit.tools import Interactive, LongRunning
 
@@ -24,7 +27,7 @@ from tasks.tailwindcss import (  # noqa: F401
     task_tailwind_build,
     task_tailwind_watch,
 )
-from tasks.task_dict import TaskDict, TaskDictGen
+from tasks.task_dict import TaskDict
 
 DOIT_CONFIG = {
     "default_tasks": ["_list"],
@@ -34,21 +37,27 @@ DOIT_CONFIG = {
 
 UV_RUN = ["uv", "run", "--frozen"]
 
+UVICORN_CMD = [
+    *UV_RUN,
+    *["uvicorn", "--port", "8000", "--workers", "4", "app.main:app"],
+]
+
 
 def task__list() -> TaskDict:
     cmd = [*UV_RUN, "doit", "list", "--all", "--status", "--sort=definition"]
     return {"actions": [cmd]}
 
 
-def task_serve() -> TaskDictGen:
+def task_serve() -> Generator[TaskDict]:
     """Start the prod server."""
-    cmd = LongRunning([*UV_RUN, "fastapi", "run", "app/main.py"], shell=False)
+    cmd = LongRunning([*UVICORN_CMD, "--host", "0.0.0.0"], shell=False)
     yield {"basename": "serve", "actions": [cmd]}
     yield {"basename": "s", "actions": [cmd]}
 
 
 def task_dev() -> TaskDict:
     """Setup development environment."""
+
     return {"actions": None, "task_dep": ["_uv_sync", "_tailwind_install"]}
 
 
@@ -57,22 +66,20 @@ def task__uv_sync() -> TaskDict:
     return {"file_dep": ["pyproject.toml"], "actions": [cmd], "targets": ["uv.lock"]}
 
 
-def task_watch() -> TaskDictGen:
+def task_watch() -> Generator[TaskDict]:
     """Start the dev server every time Python files change."""
 
     def cmd(args: list[str]) -> None:
-        cmd_action = LongRunning(
-            [*UV_RUN, "fastapi", "dev", "app/main.py", *args],
-            shell=False,
-            env={"MURCHACE_DEBUG": "1"},
-        )
-        cmd_action.execute()
+        action = [*UVICORN_CMD, "--host", "localhost", "--reload", *args]
+        env = os.environ.copy()
+        env["MURCHACE_DEBUG"] = "1"
+        LongRunning(action, shell=False, env=env).execute()
 
     yield {"basename": "watch", "actions": [cmd], "pos_arg": "args"}
     yield {"basename": "w", "actions": [cmd], "pos_arg": "args"}
 
 
-def task_test() -> TaskDictGen:
+def task_test() -> Generator[TaskDict]:
     """Run various tests."""
 
     from tasks import tailwindcss
@@ -82,15 +89,13 @@ def task_test() -> TaskDictGen:
         [*UV_RUN, "ruff", "format", "--diff"],
         [*UV_RUN, "pyright", "--stats"],
         [*UV_RUN, "pytest"],
-        # Lint Jinja template files
-        # [*UV_RUN, "djlint", "app/templates", "--ignore", "H006,H030,H031"]
         tailwindcss.comparison_test,
     ]
     yield {"basename": "test", "actions": actions}
     yield {"basename": "t", "actions": actions}
 
 
-def task_snapshot_review() -> TaskDictGen:
+def task_snapshot_review() -> Generator[TaskDict]:
     """Review inline snapshot tests."""
 
     def cmd(files_or_dirs: list[str]) -> TaskFailed | None:

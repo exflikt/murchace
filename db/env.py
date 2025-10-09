@@ -17,7 +17,7 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 from app import store  # noqa: E402
 
-target_metadata = store.sqlmodel.SQLModel.metadata
+target_metadata = store.Base.metadata
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

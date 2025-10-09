@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Annotated, Literal, Mapping
 
 import sqlalchemy
-import sqlmodel
-from datastar_py.sse import ServerSentEventGenerator
+import sqlalchemy.sql.expression as sa_exp
+from sqlalchemy.sql.functions import func as sa_func
+from datastar_py.fastapi import DatastarResponse
+from datastar_py.sse import ServerSentEventGenerator as SSE
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import HTMLResponse
 from htpy import (
@@ -30,9 +32,8 @@ from htpy import (
     tr,
     ul,
 )
-from sqlmodel import col
 
-from ..components import clock, event_response, page_layout
+from ..components import clock, page_layout
 from ..store import Order, OrderedItem, Product, database, unixepoch
 
 router = APIRouter()
@@ -248,29 +249,25 @@ def _filtered_row(row: Mapping) -> list:
     return filtered_row
 
 
-_ordered_today = sqlmodel.func.date(
-    col(Order.ordered_at), "localtime"
-) == sqlmodel.func.date("now", "localtime")
+_ordered_today = sa_func.date(Order.ordered_at, "localtime") == sa_func.date(
+    "now", "localtime"
+)
 TOTAL_SALES_QUERY: sqlalchemy.Compiled = (
-    sqlmodel.select(col(Product.product_id))
-    .select_from(sqlmodel.join(OrderedItem, Order))
+    sa_exp.select(Product.product_id)
+    .select_from(sa_exp.join(OrderedItem, Order))
     .join(Product)
     .add_columns(
-        sqlmodel.func.count(col(Product.product_id)).label("count"),
-        sqlmodel.func.count(col(Product.product_id))
-        .filter(_ordered_today)
-        .label("count_today"),
-        col(Product.name),
-        col(Product.filename),
-        col(Product.price),
-        sqlmodel.func.sum(col(Product.price)).label("total_sales"),
-        sqlmodel.func.sum(col(Product.price))
-        .filter(_ordered_today)
-        .label("total_sales_today"),
-        col(Product.no_stock),
+        sa_func.count(Product.product_id).label("count"),
+        sa_func.count(Product.product_id).filter(_ordered_today).label("count_today"),
+        Product.name,
+        Product.filename,
+        Product.price,
+        sa_func.sum(Product.price).label("total_sales"),
+        sa_func.sum(Product.price).filter(_ordered_today).label("total_sales_today"),
+        Product.no_stock,
     )
-    .where(col(Order.canceled_at).is_(None))
-    .group_by(col(Product.product_id))
+    .where(Order.canceled_at.is_(None))
+    .group_by(Product.product_id)
     .compile(compile_kwargs={"literal_binds": True})
 )
 
@@ -280,11 +277,11 @@ class AvgServiceTimeQuery:
     @lru_cache(1)
     def all_and_recent(cls) -> sqlalchemy.Compiled:
         return (
-            sqlmodel.select(
-                sqlmodel.func.avg(cls._service_time_diff).label("all"),
-                sqlmodel.func.avg(cls._last_30mins).label("recent"),
+            sa_exp.select(
+                sa_func.avg(cls._service_time_diff).label("all"),
+                sa_func.avg(cls._last_30mins).label("recent"),
             )
-            .where(col(Order.completed_at).isnot(None))
+            .where(Order.completed_at.isnot(None))
             .compile()
         )
 
@@ -292,17 +289,15 @@ class AvgServiceTimeQuery:
     @lru_cache(1)
     def recent(cls) -> sqlalchemy.Compiled:
         return (
-            sqlmodel.select(sqlmodel.func.avg(cls._last_30mins).label("recent"))
-            .where(col(Order.completed_at).isnot(None))
+            sa_exp.select(sa_func.avg(cls._last_30mins).label("recent"))
+            .where(Order.completed_at.isnot(None))
             .compile()
         )
 
-    _service_time_diff = unixepoch(col(Order.completed_at)) - unixepoch(
-        col(Order.ordered_at)
-    )
-    _elapsed_secs = sqlmodel.func.unixepoch() - unixepoch(col(Order.completed_at))
-    _last_30mins = sqlmodel.case(
-        (_elapsed_secs / sqlmodel.text("60") < sqlmodel.text("30"), _service_time_diff)
+    _service_time_diff = unixepoch(Order.completed_at) - unixepoch(Order.ordered_at)
+    _elapsed_secs = sa_func.unixepoch() - unixepoch(Order.completed_at)
+    _last_30mins = sa_exp.case(
+        (_elapsed_secs / sa_exp.text("60") < sa_exp.text("30"), _service_time_diff)
     )
 
     @staticmethod
@@ -377,8 +372,8 @@ async def get_stat(request: Request):
 
 
 WAITING_ORDER_COUNT_QUERY: sqlalchemy.Compiled = (
-    sqlmodel.select(sqlmodel.func.count(col(Order.order_id)))
-    .where(col(Order.completed_at).is_(None) & col(Order.canceled_at).is_(None))
+    sa_exp.select(sa_func.count(Order.order_id))
+    .where(Order.completed_at.is_(None) & Order.canceled_at.is_(None))
     .compile()
 )
 
@@ -403,4 +398,4 @@ async def get_estimates(
         estimate_str = AvgServiceTimeQuery.seconds_to_jpn_mmss(estimate)
 
     fragment = wait_estimate_component(estimate_str, waiting_order_count)
-    return event_response(ServerSentEventGenerator.merge_fragments([str(fragment)]))
+    return DatastarResponse(SSE.patch_elements(fragment))

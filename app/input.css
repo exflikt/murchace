@@ -3,3 +3,25 @@ https://tailwindcss.com/docs/detecting-classes-in-source-files
 */
 
 @import "tailwindcss";
+
+@theme {
+  @keyframes scale-50 {
+    0% {
+      transform: scale(50%);
+    }
+
+    100% {
+      transform: scale(100%);
+    }
+  }
+
+  @keyframes scale-95 {
+    0% {
+      transform: scale(95%);
+    }
+
+    100% {
+      transform: scale(100%);
+    }
+  }
+}

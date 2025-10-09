@@ -2,7 +2,7 @@
 # modify this module according to the implementation details.
 
 from os import PathLike
-from typing import Any, Callable, Generator, Literal, Sequence, TypedDict
+from typing import Callable, Literal, Sequence, TypedDict
 
 from doit.action import BaseAction
 from doit.exceptions import BaseFail
@@ -83,7 +83,3 @@ class TaskDict(TaskBase, total=False):
     # watch: list | tuple
     # meta: dict | None
     # """extra info from user/plugin not directly used by doit"""
-
-
-type TaskDictGen = _Gen[TaskDict]
-type _Gen[T] = Generator[T, Any, None]
